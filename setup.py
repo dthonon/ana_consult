@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python
 """
     Setup file for ana_consult.
     Use setup.cfg to configure your project.
@@ -8,7 +8,6 @@
     Learn more under: https://pyscaffold.org/
 """
 import sys
-
 from pkg_resources import VersionConflict, require
 from setuptools import setup
 
