@@ -4,6 +4,7 @@ Sample application: skeleton for new applications
 
 """
 import argparse
+import csv
 import logging
 import pkg_resources
 import shutil
@@ -11,10 +12,12 @@ import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
+import pandas as pd
+from strictyaml import YAMLValidationError
+
+from ana_consult.ac_conf import AnaConsultConf
+
 from . import _, __version__
-
-# from strictyaml import YAMLValidationError
-
 
 APP_NAME = "mtes_analyze"
 
@@ -50,6 +53,11 @@ def arguments(args):
     parser.add_argument(
         "--init", help=_("Initialize the YAML configuration file"), action="store_true"
     )
+    parser.add_argument(
+        "--preprocess",
+        help=_("Load raw csv file from scraper and do first processing"),
+        action="store_true",
+    )
     parser.add_argument("config", help=_("Configuration file name"))
 
     return parser.parse_args(args)
@@ -58,13 +66,26 @@ def arguments(args):
 def init(config: str):
     """Copy template YAML file to home directory."""
     logger = logging.getLogger(APP_NAME + ".init")
-    yaml_src = pkg_resources.resource_filename(
-        __name__, "data/cfg_template.yaml")
+    yaml_src = pkg_resources.resource_filename(__name__, "data/cfg_template.yaml")
     yaml_dst = str(Path.home() / config)
-    logger.info(_("Creating YAML configuration file %s, from %s"),
-                yaml_dst, yaml_src)
+    logger.info(_("Creating YAML configuration file %s, from %s"), yaml_dst, yaml_src)
     shutil.copyfile(yaml_src, yaml_dst)
     logger.info(_("Please edit %s before running the script"), yaml_dst)
+
+
+def preprocess(config: str):
+    """Load raw csv file from scraper and do first processing."""
+    logger = logging.getLogger(APP_NAME + ".preprocess")
+    csv_file = Path.home() / ("tmp/" + config.consultation_name + ".csv")
+    logger.info(_("Loading %s"), csv_file)
+    data = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL)
+    data[["titre", "nom_date"]] = data.sujet.str.split(", par  ", expand=True)
+    data = data.drop(columns=["sujet"])
+    data[["nom", "date"]] = data.nom_date.str.split(" ,, le ", expand=True)
+    data = data.drop(columns=["nom_date"])
+    data = data[["titre", "nom", "date", "texte"]]
+    pd.set_option("display.max_columns", 4)
+    print(data.head())
 
 
 def main(args):
@@ -117,17 +138,22 @@ def main(args):
 
     # Get configuration from file
     if not (Path.home() / args.config).is_file():
-        logger.critical(_("Configuration file %s does not exist"),
-                        str(Path.home() / args.config))
+        logger.critical(
+            _("Configuration file %s does not exist"), str(Path.home() / args.config)
+        )
         return None
     logger.info(_("Getting configuration data from %s"), args.config)
-    # try:
-    #     cfg_ctrl = EvnConf(args.config)
-    # except YAMLValidationError as error:
-    #     logger.critical(
-    #         _("Incorrect content in YAML configuration %s"), args.config)
-    #     sys.exit(0)
-    # cfg_site_list = cfg_ctrl.site_list
+    try:
+        ac_ctrl = AnaConsultConf(args.config)
+    except YAMLValidationError:
+        logger.critical(_("Incorrect content in YAML configuration %s"), args.config)
+        sys.exit(0)
+
+    # Preprocess csv file
+    if args.preprocess:
+        logger.info(_("Preprocessing raw csv file"))
+        preprocess(ac_ctrl)
+        return None
 
     return None
 
