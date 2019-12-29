@@ -30,11 +30,11 @@ class MtesCrawlSpider(scrapy.Spider):
                 "texte": ligne.css("div.textesujet *::text").getall()
             }
 
-        # if self._page < self._max_pages:
-        #     self._page += 1
-        #     self.logger.info("Téléchargement page %d", self._page)
-        #     yield scrapy.Request(
-        #         self.start_urls[0] + "?debut_forums=" + str(20*self._page),
-        #         callback=self.parse,
-        #         dont_filter=True,
-        #     )
+        if self._page < self._max_pages:
+            self._page += 1
+            self.logger.info("Téléchargement page %d", self._page)
+            yield scrapy.Request(
+                self.start_urls[0] + "?debut_forums=" + str(20*self._page),
+                callback=self.parse,
+                dont_filter=True,
+            )

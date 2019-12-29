@@ -76,16 +76,19 @@ def init(config: str):
 def preprocess(config: str):
     """Load raw csv file from scraper and do first processing."""
     logger = logging.getLogger(APP_NAME + ".preprocess")
+    pd.set_option("display.max_colwidth", 120)
     csv_file = Path.home() / ("tmp/" + config.consultation_name + ".csv")
     logger.info(_("Loading %s"), csv_file)
     data = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL)
-    data[["titre", "nom_date"]] = data.sujet.str.split(", par  ", expand=True)
+    print(data[["sujet"]].head(60))
+    data[["titre", "nom", "date", "heure"]] = data.sujet.str.extract(
+        "(.*), par  (.*) ,, le (.*) à (.*)", expand=True
+    )
     data = data.drop(columns=["sujet"])
-    data[["nom", "date"]] = data.nom_date.str.split(" ,, le ", expand=True)
-    data = data.drop(columns=["nom_date"])
-    data = data[["titre", "nom", "date", "texte"]]
-    pd.set_option("display.max_columns", 4)
-    print(data.head())
+    data = data[["titre", "nom", "date", "heure", "texte"]]
+    print(data[["titre"]].head(60))
+    csv_file = Path.home() / ("tmp/" + config.consultation_name + "_prep.csv")
+    data.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
 
 
 def main(args):
