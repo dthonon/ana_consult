@@ -13,6 +13,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import pandas as pd
+import spacy
 from strictyaml import YAMLValidationError
 
 from ana_consult.ac_conf import AnaConsultConf
@@ -58,6 +59,11 @@ def arguments(args):
         help=_("Load raw csv file from scraper and do first processing"),
         action="store_true",
     )
+    parser.add_argument(
+        "--process",
+        help=_("Load raw csv file from scraper and do first processing"),
+        action="store_true",
+    )
     parser.add_argument("config", help=_("Configuration file name"))
 
     return parser.parse_args(args)
@@ -76,19 +82,43 @@ def init(config: str):
 def preprocess(config: str):
     """Load raw csv file from scraper and do first processing."""
     logger = logging.getLogger(APP_NAME + ".preprocess")
-    pd.set_option("display.max_colwidth", 120)
+    pd.set_option("display.max_colwidth", 40)
     csv_file = Path.home() / ("tmp/" + config.consultation_name + ".csv")
     logger.info(_("Loading %s"), csv_file)
     data = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL)
-    print(data[["sujet"]].head(60))
+    logger.info(_("Loaded %s rows of raw data"), len(data))
+
+    # Split subject in specific fields
     data[["titre", "nom", "date", "heure"]] = data.sujet.str.extract(
         "(.*), par  (.*) ,, le (.*) à (.*)", expand=True
     )
     data = data.drop(columns=["sujet"])
     data = data[["titre", "nom", "date", "heure", "texte"]]
-    print(data[["titre"]].head(60))
+
+    # Drop duplicated lines
+    # print(data[["titre", "nom", "texte"]].head(60))
+    data.drop_duplicates(subset=["nom", "texte"], inplace=True)
+    logger.info(_("Storing %s rows of pre-processed data"), len(data))
+    # print(data[["titre", "nom", "texte"]].head(60))
     csv_file = Path.home() / ("tmp/" + config.consultation_name + "_prep.csv")
     data.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
+
+
+def process(config: str):
+    """Load pre-processed csv file do first base NLP processing."""
+    logger = logging.getLogger(APP_NAME + ".process")
+    pd.set_option("display.max_colwidth", 120)
+    csv_file = Path.home() / ("tmp/" + config.consultation_name + "_prep.csv")
+    logger.info(_("Loading %s"), csv_file)
+    data = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=5)
+    data["nlp_col"] = data["titre"] + ". " + data["texte"]
+    print(data["nlp_col"].head(60))
+    nlp = spacy.load("fr_core_news_sm")
+    data["doc"] = data["nlp_col"].apply(lambda x: nlp(x))
+    for doc in data["doc"]:
+        print(doc)
+        for token in doc:
+            print(token.lemma_, token.is_stop, token.is_punct)
 
 
 def main(args):
@@ -156,6 +186,12 @@ def main(args):
     if args.preprocess:
         logger.info(_("Preprocessing raw csv file"))
         preprocess(ac_ctrl)
+        return None
+
+    # NLP process csv file
+    if args.process:
+        logger.info(_("NLP processing pre-processed csv file"))
+        process(ac_ctrl)
         return None
 
     return None
