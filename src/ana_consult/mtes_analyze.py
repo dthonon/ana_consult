@@ -12,6 +12,7 @@ import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
+import hunspell
 import pandas as pd
 import spacy
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -24,6 +25,9 @@ from . import _, __version__
 APP_NAME = "mtes_analyze"
 
 logger = logging.getLogger(APP_NAME)
+
+# Spell chacking word counter (global)
+nb_words = 0
 
 
 def arguments(args):
@@ -113,7 +117,7 @@ def preprocess(config: str):
     # Drop lines in English (containing wolf)
     data.drop(data[data.texte.str.contains("wolf", case=False)].index, inplace=True)
     logger.info(_("Storing %s rows of pre-processed data"), len(data))
-    # print(data[["titre", "nom", "texte"]].head(10))
+    # print(data[["titre", "nom", "texte"]].head(12))
     csv_file = Path.home() / (
         "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
     )
@@ -129,6 +133,24 @@ def nlp_convert(nlp, txt):
         return nlp("")
 
 
+# Spell correction of misspelled words
+def spell_correction(spell, word, logger):
+    global nb_words
+    nb_words += 1
+    if (nb_words % 100) == 0:
+        logger.info(_("Spell checking word number %d"), nb_words)
+    if spell.spell(word):
+        return word
+    else:
+        sp = spell.suggest(word)
+        if len(sp) > 0:
+            print(word + " => " + sp[0])
+            return sp[0]
+        else:
+            logger.warning(_("Unable to correct %s"), word)
+            return word
+
+
 def process(config: str):
     """Load pre-processed csv file do first base NLP processing."""
     logger = logging.getLogger(APP_NAME + ".process")
@@ -137,41 +159,56 @@ def process(config: str):
         "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
     )
     logger.info(_("Loading %s"), csv_file)
-    data = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=100000)
-    data["nlp_col"] = data["titre"].str.lower() + ". " + data["texte"].str.lower()
+    data = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=200)
+    # Merge in one text column
+    data["nlp_col"] = data["titre"] + ". " + data["texte"]
 
     # Prepare NLP processing
     logger.info(_("NLP text processing"))
-    nlp = spacy.load("fr_core_news_sm")
+    nlp = spacy.load("fr_core_news_sm", disable=["tagger", "parser", "ner"])
+    logger.info(_("NLP pipeline: %s"), nlp.pipe_names)
     # Adjust stopwords for this specific topic
     nlp.Defaults.stop_words |= {
         "y",
         "france",
+        "italie",
     }
     nlp.Defaults.stop_words -= {"contre", "pour"}
     data["doc"] = data["nlp_col"].apply(lambda t: nlp_convert(nlp, t))
-    # Remove stopwords, ponctuation and spaces
-    data["doc_filt"] = data["doc"].apply(
-        lambda d: [l.lemma_ for l in d if not (l.is_stop or l.is_punct or l.is_space)]
+
+    # Correct spelling and remove stopwords, ponctuation and spaces
+    logger.info(_("Spell checking NLP document"))
+    spell = hunspell.HunSpell(
+        "/usr/share/hunspell/fr_FR.dic", "/usr/share/hunspell/fr_FR.aff"
+    )
+    added_words = pkg_resources.resource_filename(__name__, "data/mtes.txt")
+    spell.add_dic(added_words)
+    data["doc_spell"] = data["doc"].apply(
+        lambda d: [
+            spell_correction(spell, l.text, logger)
+            for l in d
+            if not (l.is_stop or l.is_punct or l.is_space)
+        ]
     )
 
     # Make a list of processed text
-    doc = data.doc_filt.apply(lambda d: " ".join(d))
-    line = 0
-    for row in data.itertuples():
-        print("--------------------------")
-        print(row.titre + ". " + row.texte)
-        print(doc[line])
-        if line < 10:
-            line += 1
-        else:
-            break
+    doc_chk = data.doc_spell.apply(lambda d: " ".join(d))
+    # line = 0
+    # for row in data.itertuples():
+    #     print("--------------------------")
+    #     print(row.titre + ". " + row.texte)
+    #     print(doc[line])
+    #     if line < 10:
+    #         line += 1
+    #     else:
+    #         break
+
     # Save data
     pkl_file = Path.home() / (
         "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
     )
     logger.info(_("Storing NLP document to %s"), pkl_file)
-    doc.to_pickle(pkl_file)
+    doc_chk.to_pickle(pkl_file)
     pkl_file = Path.home() / (
         "ana_consult/data/interim/" + config.consultation_name + "_nlp.pkl"
     )
@@ -188,6 +225,7 @@ def cluster(config: str):
     )
     logger.info(_("Loading NLP document from %s"), pkl_file)
     doc = pd.read_pickle(pkl_file)
+    logger.info(_("Document size: %s"), doc.shape)
     # define vectorizer parameters
     tfidf_vectorizer = TfidfVectorizer(
         max_df=0.8, min_df=0.2, stop_words=None, use_idf=True, ngram_range=(1, 3),
