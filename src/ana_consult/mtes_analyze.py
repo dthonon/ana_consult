@@ -14,7 +14,7 @@ from pathlib import Path
 
 import hunspell
 import pandas as pd
-import spacy
+import textacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from strictyaml import YAMLValidationError
 
@@ -124,31 +124,29 @@ def preprocess(config: str):
     data.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
 
 
-def nlp_convert(nlp, txt):
-    """Convert a text to spacy doc."""
-    try:
-        return nlp(txt)
-    except Exception:
-        print(txt)
-        return nlp("")
-
-
 # Spell correction of misspelled words
-def spell_correction(spell, word, logger):
+def spell_correction(spell, doc, logger):
     global nb_words
     nb_words += 1
     if (nb_words % 100) == 0:
         logger.info(_("Spell checking word number %d"), nb_words)
-    if spell.spell(word):
-        return word
-    else:
-        sp = spell.suggest(word)
-        if len(sp) > 0:
-            print(word + " => " + sp[0])
-            return sp[0]
+    text = ""
+    for d in doc:
+        word = d.text
+        # Spell check meaningfull words only
+        if d.is_space:
+            pass  # Nothing to check
+        elif d.is_stop or d.is_punct or spell.spell(word):
+            text += d.text_with_ws
         else:
-            logger.warning(_("Unable to correct %s"), word)
-            return word
+            sp = spell.suggest(word)
+            if len(sp) > 0:
+                print(word + " => " + sp[0])
+                text += sp[0] + d.whitespace_
+            else:
+                logger.warning(_("Unable to correct %s"), word)
+                text += d.text_with_ws
+    return text
 
 
 def process(config: str):
@@ -159,22 +157,27 @@ def process(config: str):
         "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
     )
     logger.info(_("Loading %s"), csv_file)
-    data = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=200)
+    responses = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=10)
     # Merge in one text column
-    data["nlp_col"] = data["titre"] + ". " + data["texte"]
+    responses["nlp_col"] = responses["titre"] + ". " + responses["texte"]
 
     # Prepare NLP processing
     logger.info(_("NLP text processing"))
-    nlp = spacy.load("fr_core_news_sm", disable=["tagger", "parser", "ner"])
-    logger.info(_("NLP pipeline: %s"), nlp.pipe_names)
+    fr_nlp = textacy.load_spacy_lang(
+        "fr_core_news_sm", disable=("tagger", "parser", "ner")
+    )
+    logger.info(_("NLP pipeline: %s"), fr_nlp.pipe_names)
     # Adjust stopwords for this specific topic
-    nlp.Defaults.stop_words |= {
+    fr_nlp.Defaults.stop_words |= {
         "y",
         "france",
         "italie",
     }
-    nlp.Defaults.stop_words -= {"contre", "pour"}
-    data["doc"] = data["nlp_col"].apply(lambda t: nlp_convert(nlp, t))
+    fr_nlp.Defaults.stop_words -= {"contre", "pour"}
+    # data["doc"] = data["nlp_col"].apply(lambda t: nlp_convert(fr_nlp, t))
+    corpus = textacy.Corpus(fr_nlp)
+    [corpus.add_text(t) for t in responses["nlp_col"]]
+    logger.info(_("Response corpus %s"), corpus)
 
     # Correct spelling and remove stopwords, ponctuation and spaces
     logger.info(_("Spell checking NLP document"))
@@ -183,16 +186,17 @@ def process(config: str):
     )
     added_words = pkg_resources.resource_filename(__name__, "data/mtes.txt")
     spell.add_dic(added_words)
-    data["doc_spell"] = data["doc"].apply(
-        lambda d: [
-            spell_correction(spell, l.text, logger)
-            for l in d
-            if not (l.is_stop or l.is_punct or l.is_space)
-        ]
-    )
+    # response_spell = [
+    #     lambda d: [
+    #         spell_correction(spell, l.text, logger)
+    #         for l in d
+    #         if not (l.is_stop or l.is_punct or l.is_space)
+    #     ]
+    #     for d in corpus]
+    response_spell = list()
+    for d in range(corpus.n_docs):
+        response_spell.append(spell_correction(spell, corpus[d], logger))
 
-    # Make a list of processed text
-    doc_chk = data.doc_spell.apply(lambda d: " ".join(d))
     # line = 0
     # for row in data.itertuples():
     #     print("--------------------------")
@@ -208,12 +212,12 @@ def process(config: str):
         "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
     )
     logger.info(_("Storing NLP document to %s"), pkl_file)
-    doc_chk.to_pickle(pkl_file)
-    pkl_file = Path.home() / (
-        "ana_consult/data/interim/" + config.consultation_name + "_nlp.pkl"
-    )
-    logger.info(_("Storing full data to %s"), pkl_file)
-    data.to_pickle(pkl_file)
+    response_spell.to_pickle(pkl_file)
+    # pkl_file = Path.home() / (
+    #     "ana_consult/data/interim/" + config.consultation_name + "_nlp.pkl"
+    # )
+    # logger.info(_("Storing full data to %s"), pkl_file)
+    # data.to_pickle(pkl_file)
 
 
 def cluster(config: str):
@@ -251,7 +255,7 @@ def main(args):
 
     # Define logger format and handlers
     logger = logging.getLogger(APP_NAME)
-    # create file handler which logs even debug messages
+    # Create file handler which logs even debug messages
     fh = TimedRotatingFileHandler(
         str(Path.home()) + "/tmp/" + APP_NAME + ".log",
         when="midnight",
