@@ -17,6 +17,7 @@ import pandas as pd
 import textacy
 from sklearn.feature_extraction.text import TfidfVectorizer
 from strictyaml import YAMLValidationError
+from textacy import preprocessing
 
 from ana_consult.ac_conf import AnaConsultConf
 
@@ -157,9 +158,25 @@ def process(config: str):
         "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
     )
     logger.info(_("Loading %s"), csv_file)
-    responses = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=10)
+    responses = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=100000)
     # Merge in one text column
-    responses["nlp_col"] = responses["titre"] + ". " + responses["texte"]
+    responses["raw_text"] = responses["titre"] + ". " + responses["texte"]
+    # Cleanup
+    responses["raw_text"] = responses["raw_text"].apply(
+        preprocessing.normalize.normalize_whitespace
+    )
+    responses["raw_text"] = responses["raw_text"].apply(
+        preprocessing.replace.replace_urls, replace_with=""
+    )
+    responses["raw_text"] = responses["raw_text"].apply(
+        preprocessing.replace.replace_numbers, replace_with=""
+    )
+    responses["raw_text"] = responses["raw_text"].apply(
+        preprocessing.replace.replace_emojis, replace_with=""
+    )
+    responses["raw_text"] = responses["raw_text"].apply(
+        preprocessing.replace.replace_currency_symbols, replace_with=""
+    )
 
     # Prepare NLP processing
     logger.info(_("NLP text processing"))
@@ -174,10 +191,10 @@ def process(config: str):
         "italie",
     }
     fr_nlp.Defaults.stop_words -= {"contre", "pour"}
-    # data["doc"] = data["nlp_col"].apply(lambda t: nlp_convert(fr_nlp, t))
+    # Prepare first corpus from raw text, for spell checking
     corpus = textacy.Corpus(fr_nlp)
-    [corpus.add_text(t) for t in responses["nlp_col"]]
-    logger.info(_("Response corpus %s"), corpus)
+    [corpus.add_text(t) for t in responses["raw_text"]]
+    logger.info(_("Response raw corpus %s"), corpus)
 
     # Correct spelling and remove stopwords, ponctuation and spaces
     logger.info(_("Spell checking NLP document"))
@@ -186,38 +203,30 @@ def process(config: str):
     )
     added_words = pkg_resources.resource_filename(__name__, "data/mtes.txt")
     spell.add_dic(added_words)
-    # response_spell = [
-    #     lambda d: [
-    #         spell_correction(spell, l.text, logger)
-    #         for l in d
-    #         if not (l.is_stop or l.is_punct or l.is_space)
-    #     ]
-    #     for d in corpus]
-    response_spell = list()
+    responses["checked_text"] = ""
     for d in range(corpus.n_docs):
-        response_spell.append(spell_correction(spell, corpus[d], logger))
+        responses["checked_text"][d] = spell_correction(spell, corpus[d], logger)
 
-    # line = 0
-    # for row in data.itertuples():
+    # for row in responses.head(n=2).itertuples():
     #     print("--------------------------")
-    #     print(row.titre + ". " + row.texte)
-    #     print(doc[line])
-    #     if line < 10:
-    #         line += 1
-    #     else:
-    #         break
+    #     print(row.titre, row.nom, row.date, row.heure)
+    #     print(row.raw_text)
+    #     print(row.checked_text)
+
+    # Prepare final corpus from spell-checked text, for analysis
+    corpus = textacy.Corpus(fr_nlp)
+    for row in responses.itertuples():
+        corpus.add_record(
+            (row.checked_text, {"name": row.nom, "date": row.date, "time": row.heure})
+        )
+    logger.info(_("Response spell checked corpus %s"), corpus)
 
     # Save data
     pkl_file = Path.home() / (
         "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
     )
     logger.info(_("Storing NLP document to %s"), pkl_file)
-    response_spell.to_pickle(pkl_file)
-    # pkl_file = Path.home() / (
-    #     "ana_consult/data/interim/" + config.consultation_name + "_nlp.pkl"
-    # )
-    # logger.info(_("Storing full data to %s"), pkl_file)
-    # data.to_pickle(pkl_file)
+    corpus.save(pkl_file)
 
 
 def cluster(config: str):
