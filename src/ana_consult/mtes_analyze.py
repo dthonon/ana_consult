@@ -15,7 +15,8 @@ from pathlib import Path
 import hunspell
 import pandas as pd
 import textacy
-from sklearn.feature_extraction.text import TfidfVectorizer
+import textacy.vsm
+# from sklearn.feature_extraction.text import TfidfVectorizer
 from strictyaml import YAMLValidationError
 from textacy import preprocessing
 
@@ -161,6 +162,7 @@ def process(config: str):
     responses = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=100000)
     # Merge in one text column
     responses["raw_text"] = responses["titre"] + ". " + responses["texte"]
+    responses["raw_text"].fillna(value="?", inplace=True)
     # Cleanup
     responses["raw_text"] = responses["raw_text"].apply(
         preprocessing.normalize.normalize_whitespace
@@ -222,35 +224,56 @@ def process(config: str):
     logger.info(_("Response spell checked corpus %s"), corpus)
 
     # Save data
-    pkl_file = Path.home() / (
+    corpus_file = Path.home() / (
         "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
     )
-    logger.info(_("Storing NLP document to %s"), pkl_file)
-    corpus.save(pkl_file)
+    logger.info(_("Storing NLP document to %s"), corpus_file)
+    corpus.save(corpus_file)
 
 
 def cluster(config: str):
     """Perform clustering on NLP processed data."""
     logger = logging.getLogger(APP_NAME + ".cluster")
     # Load data
-    pkl_file = Path.home() / (
+    fr_nlp = textacy.load_spacy_lang(
+        "fr_core_news_sm", disable=("tagger", "parser", "ner")
+    )
+    corpus_file = Path.home() / (
         "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
     )
-    logger.info(_("Loading NLP document from %s"), pkl_file)
-    doc = pd.read_pickle(pkl_file)
-    logger.info(_("Document size: %s"), doc.shape)
-    # define vectorizer parameters
-    tfidf_vectorizer = TfidfVectorizer(
-        max_df=0.8, min_df=0.2, stop_words=None, use_idf=True, ngram_range=(1, 3),
+    logger.info(_("Loading corpus from %s"), corpus_file)
+    corpus = textacy.Corpus.load(fr_nlp, corpus_file)
+    logger.info(_("Document size: %s"), corpus)
+    print(corpus[0])
+    # Define vectorizer parameters
+    logger.info(_("Vectorizing corpus"))
+    vectorizer = textacy.vsm.Vectorizer(
+        tf_type="linear",
+        apply_idf=True,
+        idf_type="smooth",
+        norm="l2",
+        min_df=2,
+        max_df=0.95,
     )
-    # Fit vectoriser to NLP processed column
-    logger.info(_("Fitting TF-IDF vectorizer to NLP data"))
-    tfidf_matrix = tfidf_vectorizer.fit_transform(doc)
-    terms = tfidf_vectorizer.get_feature_names()
-    logger.info(_("TF-IDF (n_samples, n_features): %s"), tfidf_matrix.shape)
-    corpus_index = [n for n in doc]
-    df = pd.DataFrame(tfidf_matrix.todense(), index=corpus_index, columns=terms)
-    print(df[0:10])
+    doc_term_matrix = vectorizer.fit_transform(
+        (
+            doc._.to_terms_list(ngrams=1, entities=True, as_strings=True)
+            for doc in corpus[:10]
+        )
+    )
+    print(doc_term_matrix)
+    # print(textacy.vsm.matrix_utils.get_term_freqs(doc_term_matrix))
+    # tfidf_vectorizer = TfidfVectorizer(
+    #     max_df=0.8, min_df=0.2, stop_words=None, use_idf=True, ngram_range=(1, 3),
+    # )
+    # # Fit vectoriser to NLP processed column
+    # logger.info(_("Fitting TF-IDF vectorizer to NLP data"))
+    # tfidf_matrix = tfidf_vectorizer.fit_transform(doc)
+    # terms = tfidf_vectorizer.get_feature_names()
+    # logger.info(_("TF-IDF (n_samples, n_features): %s"), tfidf_matrix.shape)
+    # corpus_index = [n for n in doc]
+    # df = pd.DataFrame(tfidf_matrix.todense(), index=corpus_index, columns=terms)
+    # print(df[0:10])
 
 
 def main(args):
