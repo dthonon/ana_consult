@@ -2,6 +2,7 @@
 1ers
 1re
 21e
+21ème
 4x4
 d'€
 km²
@@ -14,15 +15,18 @@ AFB
 ASPAS
 CNPN
 CRSPN
+FDSEA
 FEADER
 FERUS
 FNC
 FNE
+FNSEA
 LPO
 MNHN
 OFB
 ONCFS
 ONF
+PAC
 PNA
 PNL
 SVP
@@ -37,6 +41,7 @@ bla
 canis
 cricetus
 Culeba
+cyberaction
 déchaîné
 déchaînée
 déchaînés
@@ -50,6 +55,8 @@ lupus
 patou
 patous
 protégeable
+PastoraLoup
 ProxiLoup
 salers
+Ségolène
 sphynxs

@@ -42,6 +42,19 @@ Optional and needed only once after `git clone`:
 
 Then take a look into the `scripts` and `notebooks` folders.
 
+## Usage
+
+1. Download a consultation:
+   ```
+   cd ana_consult/scraper
+   scrapy crawl mtes_crawl -o $HOME/ana_consult/data/raw/nom_consultation.csv --logfile=$HOME/tmp/nom_consultation.log --loglevel=INFO
+   ```
+
+2. Process the consultation
+   ```
+   python -m ana_consult.mtes_analyze --prep .mtes.yaml
+   ```
+
 ## Dependency Management & Reproducibility
 
 1. Always keep your abstract (unpinned) dependencies updated in `environment.yaml` and eventually
