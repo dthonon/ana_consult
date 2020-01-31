@@ -11,14 +11,16 @@ import re
 import shutil
 import sys
 import unicodedata
+from collections import Counter
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import hunspell
+import numpy as np
 import pandas as pd
 import textacy
-import textacy.vsm
-# from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import DBSCAN, KMeans
+from sklearn.feature_extraction.text import TfidfVectorizer
 from strictyaml import YAMLValidationError
 from textacy import preprocessing
 
@@ -107,7 +109,7 @@ class Consultation(object):
         logger.info(_("NLP pipeline: %s"), self._fr_nlp.pipe_names)
         # Adjust stopwords for this specific topic
         self._fr_nlp.Defaults.stop_words |= {"y", "france", "italie"}
-        self._fr_nlp.Defaults.stop_words -= {"contre", "pour"}
+        self._fr_nlp.Defaults.stop_words -= {"contre"}
 
     def preprocess(self, config: str):
         """Load raw csv file from scraper and do first processing."""
@@ -145,7 +147,7 @@ class Consultation(object):
 
     # Spell correction of misspelled words
     @staticmethod
-    def spell_correction(spell, doc, logger):
+    def _spell_correction(spell, doc, logger):
         global nb_words
         nb_words += 1
         if (nb_words % 100) == 0:
@@ -245,9 +247,10 @@ class Consultation(object):
         )
         added_words = pkg_resources.resource_filename(__name__, "data/mtes.txt")
         spell.add_dic(added_words)
+        spell.remove("abatage")
         responses["checked_text"] = ""
         for d in range(corpus.n_docs):
-            responses["checked_text"][d] = self.spell_correction(
+            responses["checked_text"][d] = self._spell_correction(
                 spell, corpus[d], logger
             )
 
@@ -285,36 +288,73 @@ class Consultation(object):
         logger.info(_("Loading corpus from %s"), corpus_file)
         corpus = textacy.Corpus.load(self._fr_nlp, corpus_file)
         logger.info(_("Document size: %s"), corpus)
-        print(corpus[0])
+
         # Define vectorizer parameters
-        logger.info(_("Vectorizing corpus"))
-        vectorizer = textacy.vsm.Vectorizer(
-            tf_type="linear",
-            apply_idf=True,
-            idf_type="smooth",
-            norm="l2",
-            min_df=2,
-            max_df=0.95,
-        )
-        doc_term_matrix = vectorizer.fit_transform(
-            (
-                doc._.to_terms_list(ngrams=1, entities=True, as_strings=True)
-                for doc in corpus[:10]
+        logger.info(_("Simplifying corpus"))
+        doc_lemma = [
+            " ".join(
+                list(
+                    doc._.to_terms_list(
+                        ngrams=1,
+                        entities=False,
+                        normalize="lemma",
+                        as_strings=True,
+                        filter_stops=True,
+                        filter_punct=True,
+                        filter_nums=True,
+                    )
+                )
             )
+            for doc in corpus[:1000000]
+        ]
+
+        tfidf_vectorizer = TfidfVectorizer(
+            max_df=0.9, min_df=0.1, stop_words=None, use_idf=True, ngram_range=(1, 3)
         )
-        print(doc_term_matrix)
-        # print(textacy.vsm.matrix_utils.get_term_freqs(doc_term_matrix))
-        # tfidf_vectorizer = TfidfVectorizer(
-        #     max_df=0.8, min_df=0.2, stop_words=None, use_idf=True, ngram_range=(1, 3),
-        # )
-        # # Fit vectoriser to NLP processed column
-        # logger.info(_("Fitting TF-IDF vectorizer to NLP data"))
-        # tfidf_matrix = tfidf_vectorizer.fit_transform(doc)
-        # terms = tfidf_vectorizer.get_feature_names()
-        # logger.info(_("TF-IDF (n_samples, n_features): %s"), tfidf_matrix.shape)
-        # corpus_index = [n for n in doc]
+        # Fit vectoriser to NLP processed column
+        logger.info(_("Fitting TF-IDF vectorizer to NLP data"))
+        tfidf_matrix = tfidf_vectorizer.fit_transform(doc_lemma)
+        terms = tfidf_vectorizer.get_feature_names()
+        logger.info(_("TF-IDF (n_samples, n_features): %s"), tfidf_matrix.shape)
+        # corpus_index = [n for n in doc_lemma]
         # df = pd.DataFrame(tfidf_matrix.todense(), index=corpus_index, columns=terms)
         # print(df[0:10])
+
+        # K-means clustering
+        logger.info(_("K-means clustering"))
+        true_k = 2
+        model = KMeans(n_clusters=true_k, init="k-means++", max_iter=100, n_init=1)
+        model.fit(tfidf_matrix)
+        logger.info(_("Cluster summary:"))
+        order_centroids = model.cluster_centers_.argsort()[:, ::-1]
+        terms = tfidf_vectorizer.get_feature_names()
+        cl_size = Counter(model.labels_)
+        for i in range(true_k):
+            logger.info(
+                _("Cluster %d, proportion: %d%%, top terms:"),
+                i,
+                cl_size[i] / len(corpus) * 100,
+            )
+            top_t = ", ".join([terms[t] for t in order_centroids[i, :10]])
+            logger.info(top_t)
+
+        # DBSCAN clustering
+        logger.info(_("DBSCAN clustering"))
+        model = DBSCAN(eps=2.1, min_samples=10, metric="l1")
+        model.fit(tfidf_matrix)
+        logger.info(_("Cluster summary:"))
+        core_samples_mask = np.zeros_like(model.labels_, dtype=bool)
+        core_samples_mask[model.core_sample_indices_] = True
+        labels = model.labels_
+        # Number of clusters in labels, ignoring noise if present.
+        n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+        n_noise_ = list(labels).count(-1)
+        logger.info(_("Estimated number of clusters: %d"), n_clusters_)
+        logger.info(_("Estimated number of noise points: %d"), n_noise_)
+        for i in range(n_clusters_):
+            logger.info(
+                _("Cluster %d, proportion: %d%%"), i, cl_size[i] / len(corpus) * 100
+            )
 
 
 def main(args):
