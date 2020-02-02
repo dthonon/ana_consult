@@ -101,6 +101,7 @@ class Consultation(object):
     def __init__(self):
         logger = logging.getLogger(APP_NAME + ".__init__")
         super().__init__()
+        pd.set_option("display.max_colwidth", 40)
         # Prepare NLP processing
         logger.info(_("Preparing NLP text processing"))
         self._fr_nlp = textacy.load_spacy_lang(
@@ -111,43 +112,96 @@ class Consultation(object):
         self._fr_nlp.Defaults.stop_words |= {"y", "france", "italie"}
         self._fr_nlp.Defaults.stop_words -= {"contre"}
 
+    def _clean_unicode(self, ch):
+        """Remove unprintable character
+        You can find a full list of categories here:
+        http://www.fileformat.info/info/unicode/category/index.htm"""
+        letters = ("LC", "Ll", "Lm", "Lo", "Lt", "Lu")
+        numbers = ("Nd", "Nl", "No")
+        marks = ("Mc", "Me", "Mn")
+        punctuation = ("Pc", "Pd", "Pe", "Pf", "Pi", "Po", "Ps")
+        symbol = ("Sc", "Sk", "Sm", "So")
+        space = ("Zl", "Zp", "Zs")
+
+        allowed_categories = letters + numbers + marks + punctuation + symbol
+        if unicodedata.category(ch) in space:
+            return " "
+        elif unicodedata.category(ch) in allowed_categories:
+            return ch
+        else:
+            return " "
+
+    def _remove_tags(self, text):
+        """Cleans a string :
+        - removing HTML tags
+        - removing shortcuts, such as =>...
+        - removing non printable text, based on a whitelist of printable unicode
+        """
+        TAG_RE = re.compile(r"<[^>]+>|[=\-,]?>|\+|\/\/")
+        text = TAG_RE.sub("", text)
+
+        text = u"".join([self._clean_unicode(c) for c in text])
+        return text
+
     def preprocess(self, config: str):
-        """Load raw csv file from scraper and do first processing."""
+        """Load raw csv file from scraper and do first processing:
+        - Split subject in title, name, datetime.
+        - Drop duplicates."""
         logger = logging.getLogger(APP_NAME + ".preprocess")
-        pd.set_option("display.max_colwidth", 40)
         csv_file = Path.home() / (
             "ana_consult/data/raw/" + config.consultation_name + ".csv"
         )
         logger.info(_("Loading %s"), csv_file)
-        data = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL)
-        logger.info(_("Loaded %s rows of raw data"), len(data))
+        responses = pd.read_csv(
+            csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=1000000
+        )
+        logger.info(_("Loaded %s rows of raw data"), len(responses))
 
         # Split subject in specific fields
-        data[["titre", "nom", "date", "heure"]] = data.sujet.str.extract(
+        responses[["titre", "nom", "date", "heure"]] = responses.sujet.str.extract(
             "(.*), par  (.*) ,, le (.*) à (.*)", expand=True
         )
-        data = data.drop(columns=["sujet"])
-        data = data[["titre", "nom", "date", "heure", "texte"]]
-        csv_file = Path.home() / (
-            "ana_consult/data/interim/" + config.consultation_name + "_split.csv"
-        )
-        data.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
+        responses = responses.drop(columns=["sujet"])
+        responses = responses[["titre", "nom", "date", "heure", "texte"]]
 
         # Drop duplicated lines
-        # print(repr(data[["titre", "nom", "texte"]].head(10)))
-        data.drop_duplicates(subset=["nom", "texte"], inplace=True)
-        # Drop lines in English (containing wolf)
-        data.drop(data[data.texte.str.contains("wolf", case=False)].index, inplace=True)
-        logger.info(_("Storing %s rows of pre-processed data"), len(data))
+        responses.drop_duplicates(subset=["nom", "titre"], inplace=True)
+        responses.drop_duplicates(subset=["nom", "texte"], inplace=True)
+        logger.info(_("%s rows remaining after deduplication"), len(responses))
+
+        # Merge in one text column
+        responses["raw_text"] = responses["titre"] + ". " + responses["texte"]
+        responses["raw_text"].fillna(value="?", inplace=True)
+        responses = responses.drop(columns=["texte"])
+
+        # Cleanup
+        responses["raw_text"] = responses["raw_text"].apply(
+            preprocessing.normalize.normalize_whitespace
+        )
+        responses["raw_text"] = responses["raw_text"].apply(
+            preprocessing.replace.replace_urls, replace_with=""
+        )
+        responses["raw_text"] = responses["raw_text"].apply(
+            preprocessing.replace.replace_numbers, replace_with=""
+        )
+        responses["raw_text"] = responses["raw_text"].apply(
+            preprocessing.replace.replace_emojis, replace_with=""
+        )
+        responses["raw_text"] = responses["raw_text"].apply(
+            preprocessing.replace.replace_currency_symbols, replace_with="Euros"
+        )
+        responses["raw_text"] = responses["raw_text"].apply(self._remove_tags)
+
+        logger.info(_("Storing %s rows of pre-processed data"), len(responses))
         # print(data[["titre", "nom", "texte"]].head(12))
         csv_file = Path.home() / (
             "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
         )
-        data.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
+        responses.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
 
-    # Spell correction of misspelled words
     @staticmethod
     def _spell_correction(spell, doc, logger):
+        """Spell correction of misspelled words."""
         global nb_words
         nb_words += 1
         if (nb_words % 100) == 0:
@@ -170,41 +224,10 @@ class Consultation(object):
                     text += d.text_with_ws
         return text
 
-    # Remove HTML tags and other unwanted strings
-    def _clean_unicode(self, ch):
-        "Remove unprintable character"
-        letters = ("LC", "Ll", "Lm", "Lo", "Lt", "Lu")
-        numbers = ("Nd", "Nl", "No")
-        marks = ("Mc", "Me", "Mn")
-        punctuation = ("Pc", "Pd", "Pe", "Pf", "Pi", "Po", "Ps")
-        symbol = ("Sc", "Sk", "Sm", "So")
-        space = ("Zl", "Zp", "Zs")
-
-        allowed_categories = letters + numbers + marks + punctuation + symbol
-        if unicodedata.category(ch) in space:
-            return " "
-        elif unicodedata.category(ch) in allowed_categories:
-            return ch
-        else:
-            return " "
-
-    # Remove HTML tags and other unwanted strings
-    def _remove_tags(self, text):
-        """Cleans a string :
-        - removing HTML tags
-        - removing shortcuts, such as =>...
-        - removing non printable text, based on a whitelist of printable unicode
-        You can find a full list of categories here:
-        http://www.fileformat.info/info/unicode/category/index.htm
-        """
-        TAG_RE = re.compile(r"<[^>]+>|[=\-,]?>|\+|\/\/")
-        text = TAG_RE.sub("", text)
-
-        text = u"".join([self._clean_unicode(c) for c in text])
-        return text
-
     def process(self, config: str):
-        """Load pre-processed csv file do first base NLP processing."""
+        """Load pre-processed csv file do first base NLP processing:
+        - Clean text from unusable element (url, non-printable...)
+        - Spelling correction"""
         logger = logging.getLogger(APP_NAME + ".process")
         pd.set_option("display.max_colwidth", 120)
         csv_file = Path.home() / (
@@ -214,31 +237,18 @@ class Consultation(object):
         responses = pd.read_csv(
             csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=1000000
         )
-        # Merge in one text column
-        responses["raw_text"] = responses["titre"] + ". " + responses["texte"]
-        responses["raw_text"].fillna(value="?", inplace=True)
-        # Cleanup
-        responses["raw_text"] = responses["raw_text"].apply(
-            preprocessing.normalize.normalize_whitespace
-        )
-        responses["raw_text"] = responses["raw_text"].apply(
-            preprocessing.replace.replace_urls, replace_with=""
-        )
-        responses["raw_text"] = responses["raw_text"].apply(
-            preprocessing.replace.replace_numbers, replace_with=""
-        )
-        responses["raw_text"] = responses["raw_text"].apply(
-            preprocessing.replace.replace_emojis, replace_with=""
-        )
-        responses["raw_text"] = responses["raw_text"].apply(
-            preprocessing.replace.replace_currency_symbols, replace_with="Euros"
-        )
-        responses["raw_text"] = responses["raw_text"].apply(self._remove_tags)
+        logger.info(_("Loaded %s rows of pre-processed data"), len(responses))
 
         # Prepare first corpus from raw text, for spell checking
-        corpus = textacy.Corpus(self._fr_nlp)
-        [corpus.add_text(t) for t in responses["raw_text"]]
-        logger.info(_("Response raw corpus %s"), corpus)
+        corpus = textacy.Corpus(
+            self._fr_nlp,
+            data=(
+                t
+                for t in responses["raw_text"]
+                if textacy.lang_utils.identify_lang(t) == "fr"
+            ),
+        )
+        logger.info(_("Response pre-processed corpus %s"), corpus)
 
         # Correct spelling and remove stopwords, ponctuation and spaces
         logger.info(_("Spell checking NLP document"))
