@@ -5,6 +5,7 @@ Sample application: skeleton for new applications
 """
 import argparse
 import csv
+import hashlib
 import logging
 import pkg_resources
 import re
@@ -12,6 +13,7 @@ import shutil
 import sys
 import unicodedata
 from collections import Counter
+from functools import lru_cache
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
@@ -32,7 +34,7 @@ APP_NAME = "mtes_analyze"
 
 logger = logging.getLogger(APP_NAME)
 
-# Spell chacking word counter (global)
+# Spell checking word counter (global)
 nb_words = 0
 
 
@@ -99,18 +101,23 @@ class Consultation(object):
     """Provides methods to process a consultation."""
 
     def __init__(self):
-        logger = logging.getLogger(APP_NAME + ".__init__")
         super().__init__()
         pd.set_option("display.max_colwidth", 40)
+
+    @property
+    @lru_cache(maxsize=1)
+    def _fr_nlp(self):
+        logger = logging.getLogger(APP_NAME + ".__init__")
         # Prepare NLP processing
         logger.info(_("Preparing NLP text processing"))
-        self._fr_nlp = textacy.load_spacy_lang(
+        _nlp = textacy.load_spacy_lang(
             "fr_core_news_sm", disable=("tagger", "parser", "ner")
         )
-        logger.info(_("NLP pipeline: %s"), self._fr_nlp.pipe_names)
+        logger.info(_("NLP pipeline: %s"), _nlp.pipe_names)
         # Adjust stopwords for this specific topic
-        self._fr_nlp.Defaults.stop_words |= {"y", "france", "italie"}
-        self._fr_nlp.Defaults.stop_words -= {"contre"}
+        _nlp.Defaults.stop_words |= {"y", "france", "italie"}
+        _nlp.Defaults.stop_words -= {"contre"}
+        return _nlp
 
     def _clean_unicode(self, ch):
         """Remove unprintable character
@@ -192,8 +199,13 @@ class Consultation(object):
         )
         responses["raw_text"] = responses["raw_text"].apply(self._remove_tags)
 
+        # Add hash-key to ensure cross-reference with manually modified files
+        responses["hash"] = responses.raw_text.apply(
+            lambda t: hashlib.sha224(t.encode("utf-8")).hexdigest()
+        )
+
+        # Save to csv file
         logger.info(_("Storing %s rows of pre-processed data"), len(responses))
-        # print(data[["titre", "nom", "texte"]].head(12))
         csv_file = Path.home() / (
             "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
         )
