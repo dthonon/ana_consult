@@ -164,12 +164,17 @@ class Consultation(object):
         )
         logger.info(_("Loaded %s rows of raw data"), len(responses))
 
+        # Add hash-key to ensure cross-reference with manually modified files
+        responses["uid"] = responses.sujet.apply(
+            lambda t: hashlib.sha224(t.encode("utf-8")).hexdigest()
+        )
+
         # Split subject in specific fields
         responses[["titre", "nom", "date", "heure"]] = responses.sujet.str.extract(
             "(.*), par  (.*) ,, le (.*) à (.*)", expand=True
         )
         responses = responses.drop(columns=["sujet"])
-        responses = responses[["titre", "nom", "date", "heure", "texte"]]
+        responses = responses[["titre", "nom", "date", "heure", "texte", "uid"]]
 
         # Drop duplicated lines
         responses.drop_duplicates(subset=["nom", "titre"], inplace=True)
