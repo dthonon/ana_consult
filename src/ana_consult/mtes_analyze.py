@@ -18,10 +18,11 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import hunspell
-import numpy as np
+# import numpy as np
 import pandas as pd
 import textacy
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn import metrics
+from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
 from strictyaml import YAMLValidationError
 from textacy import preprocessing
@@ -204,17 +205,22 @@ class Consultation(object):
         )
         responses["raw_text"] = responses["raw_text"].apply(self._remove_tags)
 
-        # Add hash-key to ensure cross-reference with manually modified files
-        responses["hash"] = responses.raw_text.apply(
-            lambda t: hashlib.sha224(t.encode("utf-8")).hexdigest()
-        )
-
-        # Save to csv file
+        # Save preprocessed data to csv file
         logger.info(_("Storing %s rows of pre-processed data"), len(responses))
         csv_file = Path.home() / (
             "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
         )
         responses.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
+
+        # Merge with category file, if exists
+        csv_file = Path.home() / (
+            "ana_consult/data/external/" + config.consultation_name + "_cat.csv"
+        )
+        logger.info(_("Loading category file %s"), csv_file)
+        categories = pd.read_csv(
+            csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=1000000
+        )
+        logger.info(_("Loaded %s rows of category data"), len(categories))
 
     @staticmethod
     def _spell_correction(spell, doc, logger):
@@ -246,15 +252,29 @@ class Consultation(object):
         - Clean text from unusable element (url, non-printable...)
         - Spelling correction"""
         logger = logging.getLogger(APP_NAME + ".process")
-        pd.set_option("display.max_colwidth", 120)
+        # pd.set_option("display.max_colwidth", 120)
+        # Read preprocessed data
         csv_file = Path.home() / (
             "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
         )
-        logger.info(_("Loading %s"), csv_file)
-        responses = pd.read_csv(
-            csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=1000000
-        )
+        logger.info(_("Loading data %s"), csv_file)
+        responses = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=500)
         logger.info(_("Loaded %s rows of pre-processed data"), len(responses))
+        # Read classification data, if it exists
+        csv_file = Path.home() / (
+            "ana_consult/data/external/" + config.consultation_name + "_cat.csv"
+        )
+        if csv_file.exists():
+            logger.info(_("Loading classification %s"), csv_file)
+            classif = pd.read_csv(
+                csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=1000000
+            )
+            logger.info(_("Loaded %s rows of classification data"), len(classif))
+            classif = classif.drop(columns=["raw_text"])
+            responses = responses.merge(classif, on="uid")
+        else:
+            logger.info(_("No classification found %s"), csv_file)
+            classif = None
 
         # Prepare first corpus from raw text, for spell checking
         corpus = textacy.Corpus(
@@ -293,11 +313,18 @@ class Consultation(object):
             corpus.add_record(
                 (
                     row.checked_text,
-                    {"name": row.nom, "date": row.date, "time": row.heure},
+                    {
+                        "name": row.nom,
+                        "date": row.date,
+                        "time": row.heure,
+                        "opinion": row.opinion,
+                        "uid": row.uid,
+                    },
                 )
             )
         logger.info(_("Response spell checked corpus %s"), corpus)
-
+        # print(corpus[0]._.preview)
+        # print("meta:", corpus[0]._.meta)
         # Save data
         corpus_file = Path.home() / (
             "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
@@ -318,29 +345,36 @@ class Consultation(object):
 
         # Define vectorizer parameters
         logger.info(_("Simplifying corpus"))
-        doc_lemma = [
-            " ".join(
-                list(
-                    doc._.to_terms_list(
-                        ngrams=1,
-                        entities=False,
-                        normalize="lemma",
-                        as_strings=True,
-                        filter_stops=True,
-                        filter_punct=True,
-                        filter_nums=True,
-                    )
-                )
-            )
-            for doc in corpus[:1000000]
-        ]
+        doc_lemma = pd.DataFrame(
+            [
+                [
+                    " ".join(
+                        list(
+                            doc._.to_terms_list(
+                                ngrams=1,
+                                entities=False,
+                                normalize="lemma",
+                                as_strings=True,
+                                filter_stops=True,
+                                filter_punct=True,
+                                filter_nums=True,
+                            )
+                        )
+                    ),
+                    doc._.meta["opinion"],
+                ]
+                for doc in corpus[:1000000]
+            ],
+            columns=["text", "opinion"],
+        ).dropna()
+        print(doc_lemma.head(20))
 
         tfidf_vectorizer = TfidfVectorizer(
             max_df=0.9, min_df=0.1, stop_words=None, use_idf=True, ngram_range=(1, 3)
         )
         # Fit vectoriser to NLP processed column
         logger.info(_("Fitting TF-IDF vectorizer to NLP data"))
-        tfidf_matrix = tfidf_vectorizer.fit_transform(doc_lemma)
+        tfidf_matrix = tfidf_vectorizer.fit_transform(doc_lemma.text)
         terms = tfidf_vectorizer.get_feature_names()
         logger.info(_("TF-IDF (n_samples, n_features): %s"), tfidf_matrix.shape)
         # corpus_index = [n for n in doc_lemma]
@@ -351,8 +385,15 @@ class Consultation(object):
         logger.info(_("K-means clustering"))
         true_k = 2
         model = KMeans(n_clusters=true_k, init="k-means++", max_iter=100, n_init=1)
-        model.fit(tfidf_matrix)
+        pred_labels = list(model.fit_predict(tfidf_matrix))
         logger.info(_("Cluster summary:"))
+        true_labels = [0 if d == "Favorable" else 1 for d in doc_lemma.opinion]
+        print(true_labels[:50])
+        print(pred_labels[:50])
+        print(
+            "Homogeneity: %0.3f" % metrics.homogeneity_score(true_labels, pred_labels)
+        )
+        print(metrics.confusion_matrix(true_labels, pred_labels))
         order_centroids = model.cluster_centers_.argsort()[:, ::-1]
         terms = tfidf_vectorizer.get_feature_names()
         cl_size = Counter(model.labels_)
@@ -365,23 +406,23 @@ class Consultation(object):
             top_t = ", ".join([terms[t] for t in order_centroids[i, :10]])
             logger.info(top_t)
 
-        # DBSCAN clustering
-        logger.info(_("DBSCAN clustering"))
-        model = DBSCAN(eps=2.1, min_samples=10, metric="l1")
-        model.fit(tfidf_matrix)
-        logger.info(_("Cluster summary:"))
-        core_samples_mask = np.zeros_like(model.labels_, dtype=bool)
-        core_samples_mask[model.core_sample_indices_] = True
-        labels = model.labels_
-        # Number of clusters in labels, ignoring noise if present.
-        n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
-        n_noise_ = list(labels).count(-1)
-        logger.info(_("Estimated number of clusters: %d"), n_clusters_)
-        logger.info(_("Estimated number of noise points: %d"), n_noise_)
-        for i in range(n_clusters_):
-            logger.info(
-                _("Cluster %d, proportion: %d%%"), i, cl_size[i] / len(corpus) * 100
-            )
+        # # DBSCAN clustering
+        # logger.info(_("DBSCAN clustering"))
+        # model = DBSCAN(eps=2.1, min_samples=10, metric="l1")
+        # model.fit(tfidf_matrix)
+        # logger.info(_("Cluster summary:"))
+        # core_samples_mask = np.zeros_like(model.labels_, dtype=bool)
+        # core_samples_mask[model.core_sample_indices_] = True
+        # labels = model.labels_
+        # # Number of clusters in labels, ignoring noise if present.
+        # n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+        # n_noise_ = list(labels).count(-1)
+        # logger.info(_("Estimated number of clusters: %d"), n_clusters_)
+        # logger.info(_("Estimated number of noise points: %d"), n_noise_)
+        # for i in range(n_clusters_):
+        #     logger.info(
+        #         _("Cluster %d, proportion: %d%%"), i, cl_size[i] / len(corpus) * 100
+        #     )
 
 
 def main(args):
