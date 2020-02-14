@@ -18,12 +18,15 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import hunspell
+import matplotlib.pyplot as plt
 # import numpy as np
 import pandas as pd
 import textacy
-from sklearn import metrics
+from sklearn import metrics, tree
 from sklearn.cluster import KMeans
+# from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
 from strictyaml import YAMLValidationError
 from textacy import preprocessing
 
@@ -79,9 +82,10 @@ def arguments(args):
         action="store_true",
     )
     parser.add_argument(
-        "--cluster",
-        help=_("Load raw csv file from scraper and do first processing"),
-        action="store_true",
+        "--cluster", help=_("Clustering of processed text"), action="store_true"
+    )
+    parser.add_argument(
+        "--classify", help=_("Classification of processed text"), action="store_true"
     )
     parser.add_argument("config", help=_("Configuration file name"))
 
@@ -258,7 +262,9 @@ class Consultation(object):
             "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
         )
         logger.info(_("Loading data %s"), csv_file)
-        responses = pd.read_csv(csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=500)
+        responses = pd.read_csv(
+            csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=1000000
+        )
         logger.info(_("Loaded %s rows of pre-processed data"), len(responses))
         # Read classification data, if it exists
         csv_file = Path.home() / (
@@ -424,6 +430,66 @@ class Consultation(object):
         #         _("Cluster %d, proportion: %d%%"), i, cl_size[i] / len(corpus) * 100
         #     )
 
+    def classify(self, config: str):
+        """Perform classification on NLP processed data."""
+        logger = logging.getLogger(APP_NAME + ".cluster")
+        # Load data
+        corpus_file = Path.home() / (
+            "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
+        )
+        logger.info(_("Loading corpus from %s"), corpus_file)
+        corpus = textacy.Corpus.load(self._fr_nlp, corpus_file)
+        logger.info(_("Document size: %s"), corpus)
+
+        # Define vectorizer parameters
+        logger.info(_("Simplifying corpus"))
+        doc_lemma = pd.DataFrame(
+            [
+                [
+                    " ".join(
+                        list(
+                            doc._.to_terms_list(
+                                ngrams=1,
+                                entities=False,
+                                normalize="lemma",
+                                as_strings=True,
+                                filter_stops=True,
+                                filter_punct=True,
+                                filter_nums=True,
+                            )
+                        )
+                    ),
+                    doc._.meta["opinion"],
+                ]
+                for doc in corpus[:1000000]
+            ],
+            columns=["text", "opinion"],
+        )
+        print(doc_lemma.head(20))
+        doc_lemma_cls = doc_lemma.dropna()
+        print(doc_lemma_cls.opinion.describe())
+        true_labels = [0 if d == "Favorable" else 1 for d in doc_lemma_cls.opinion]
+        X_train, X_test, y_train, y_test = train_test_split(
+            doc_lemma_cls.text, true_labels, random_state=0
+        )
+
+        tfidf_vectorizer = TfidfVectorizer(
+            max_df=0.9, min_df=0.1, stop_words=None, use_idf=True, ngram_range=(1, 3)
+        )
+        # Fit vectoriser to NLP processed column
+        logger.info(_("Fitting TF-IDF vectorizer to NLP data"))
+        tfidf_matrix = tfidf_vectorizer.fit_transform(X_train)
+        terms = tfidf_vectorizer.get_feature_names()
+        logger.info(_("TF-IDF (n_samples, n_features): %s"), tfidf_matrix.shape)
+        print(terms[:10])
+
+        # Classify by decision tree
+        clf = tree.DecisionTreeClassifier(max_depth=2)
+        clf_t = clf.fit(tfidf_matrix, y_train)
+        print(clf_t)
+        tree.plot_tree(clf_t)
+        plt.show()
+
 
 def main(args):
     """Main entry point allowing external calls
@@ -505,6 +571,12 @@ def main(args):
     if args.cluster:
         logger.info(_("Clustering processed file"))
         consult.cluster(ac_ctrl)
+        return None
+
+    # Classifying
+    if args.classify:
+        logger.info(_("Classifying processed file"))
+        consult.classify(ac_ctrl)
         return None
 
     logger.info(_("End of processing"))
