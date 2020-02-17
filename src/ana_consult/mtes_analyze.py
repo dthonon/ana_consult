@@ -281,17 +281,7 @@ class Consultation(object):
         else:
             logger.info(_("No classification found %s"), csv_file)
             classif = None
-
-        # Prepare first corpus from raw text, for spell checking
-        corpus = textacy.Corpus(
-            self._fr_nlp,
-            data=(
-                t
-                for t in responses["raw_text"]
-                if textacy.lang_utils.identify_lang(t) == "fr"
-            ),
-        )
-        logger.info(_("Response pre-processed corpus %s"), corpus)
+        # print(responses.head(50))
 
         # Correct spelling and remove stopwords, ponctuation and spaces
         logger.info(_("Spell checking NLP document"))
@@ -301,36 +291,37 @@ class Consultation(object):
         added_words = pkg_resources.resource_filename(__name__, "data/mtes.txt")
         spell.add_dic(added_words)
         spell.remove("abatage")
-        responses["checked_text"] = ""
-        for d in range(corpus.n_docs):
-            responses["checked_text"][d] = self._spell_correction(
-                spell, corpus[d], logger
-            )
 
-        # for row in responses.head(n=2).itertuples():
+        # for row in responses.head(n=30).itertuples():
         #     print("--------------------------")
-        #     print(row.titre, row.nom, row.date, row.heure)
-        #     print(row.raw_text)
-        #     print(row.checked_text)
+        #     print(row.titre, row.nom, row.date, row.heure, row.opinion)
+        #     print(row.raw_text[0:100])
+        #     print(row.checked_text[0:100])
 
         # Prepare final corpus from spell-checked text, for analysis
         corpus = textacy.Corpus(self._fr_nlp)
         for row in responses.itertuples():
-            corpus.add_record(
-                (
-                    row.checked_text,
-                    {
-                        "name": row.nom,
-                        "date": row.date,
-                        "time": row.heure,
-                        "opinion": row.opinion,
-                        "uid": row.uid,
-                    },
+            if textacy.lang_utils.identify_lang(row.raw_text) == "fr":
+                corpus.add_record(
+                    (
+                        self._spell_correction(
+                            spell,
+                            textacy.make_spacy_doc(row.raw_text, self._fr_nlp),
+                            logger,
+                        ),
+                        {
+                            "name": row.nom,
+                            "date": row.date,
+                            "time": row.heure,
+                            "opinion": row.opinion,
+                            "uid": row.uid,
+                        },
+                    )
                 )
-            )
         logger.info(_("Response spell checked corpus %s"), corpus)
-        # print(corpus[0]._.preview)
-        # print("meta:", corpus[0]._.meta)
+        # for d in range(50):
+        #     print(corpus[d]._.preview)
+        #     print("meta:", corpus[d]._.meta)
         # Save data
         corpus_file = Path.home() / (
             "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
