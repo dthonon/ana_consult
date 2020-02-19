@@ -115,6 +115,7 @@ class Consultation(object):
         logger = logging.getLogger(APP_NAME + ".__init__")
         # Prepare NLP processing
         logger.info(_("Preparing NLP text processing"))
+        # spacy.prefer_gpu()
         _nlp = textacy.load_spacy_lang(
             "fr_core_news_sm", disable=("tagger", "parser", "ner")
         )
@@ -210,24 +211,16 @@ class Consultation(object):
         responses["raw_text"] = responses["raw_text"].apply(self._remove_tags)
 
         # Save preprocessed data to csv file
-        logger.info(_("Storing %s rows of pre-processed data"), len(responses))
         csv_file = Path.home() / (
             "ana_consult/data/interim/" + config.consultation_name + "_prep.csv"
         )
+        logger.info(
+            _("Storing %s rows of pre-processed data to %s"), len(responses), csv_file
+        )
         responses.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
 
-        # Merge with category file, if exists
-        csv_file = Path.home() / (
-            "ana_consult/data/external/" + config.consultation_name + "_cat.csv"
-        )
-        logger.info(_("Loading category file %s"), csv_file)
-        categories = pd.read_csv(
-            csv_file, header=0, quoting=csv.QUOTE_ALL, nrows=1000000
-        )
-        logger.info(_("Loaded %s rows of category data"), len(categories))
-
     @staticmethod
-    def _spell_correction(spell, doc, logger):
+    def _spell_correction(doc, spell, logger):
         """Spell correction of misspelled words."""
         global nb_words
         nb_words += 1
@@ -244,8 +237,9 @@ class Consultation(object):
             else:
                 sp = spell.suggest(word)
                 if len(sp) > 0:
-                    print(word + " => " + sp[0])
-                    text += sp[0] + d.whitespace_
+                    rep = sp[0]
+                    print(word + " => " + rep)
+                    text += rep + d.whitespace_
                 else:
                     logger.warning(_("Unable to correct %s"), word)
                     text += d.text_with_ws
@@ -299,35 +293,46 @@ class Consultation(object):
         #     print(row.checked_text[0:100])
 
         # Prepare final corpus from spell-checked text, for analysis
-        corpus = textacy.Corpus(self._fr_nlp)
-        for row in responses.itertuples():
-            if textacy.lang_utils.identify_lang(row.raw_text) == "fr":
-                corpus.add_record(
-                    (
-                        self._spell_correction(
-                            spell,
-                            textacy.make_spacy_doc(row.raw_text, self._fr_nlp),
-                            logger,
-                        ),
-                        {
-                            "name": row.nom,
-                            "date": row.date,
-                            "time": row.heure,
-                            "opinion": row.opinion,
-                            "uid": row.uid,
-                        },
-                    )
-                )
-        logger.info(_("Response spell checked corpus %s"), corpus)
+        # corpus = textacy.Corpus(self._fr_nlp)
+        # for row in responses.itertuples():
+        #     if textacy.lang_utils.identify_lang(row.raw_text) == "fr":
+        #         corpus.add_record(
+        #             (
+        #                 self._spell_correction(
+        #                     spell,
+        #                     textacy.make_spacy_doc(row.raw_text, self._fr_nlp),
+        #                     logger,
+        #                 ).lower(),
+        #                 {
+        #                     "name": row.nom,
+        #                     "date": row.date,
+        #                     "time": row.heure,
+        #                     "opinion": row.opinion,
+        #                     "uid": row.uid,
+        #                 },
+        #             )
+        #         )
+        # logger.info(_("Response spell checked corpus %s"), corpus)
         # for d in range(50):
         #     print(corpus[d]._.preview)
         #     print("meta:", corpus[d]._.meta)
-        # Save data
-        corpus_file = Path.home() / (
-            "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
+        # # Save data
+        # corpus_file = Path.home() / (
+        #     "ana_consult/data/interim/" + config.consultation_name + "_doc.pkl"
+        # )
+        # logger.info(_("Storing NLP document to %s"), corpus_file)
+        # corpus.save(corpus_file)
+
+        responses["checked_text"] = responses["raw_text"].apply(
+            lambda d: self._spell_correction(self._fr_nlp(d), spell, logger))
+        # Save processed data to csv file
+        csv_file = Path.home() / (
+            "ana_consult/data/interim/" + config.consultation_name + "_pro.csv"
         )
-        logger.info(_("Storing NLP document to %s"), corpus_file)
-        corpus.save(corpus_file)
+        logger.info(
+            _("Storing %s rows of processed data to %s"), len(responses), csv_file
+        )
+        responses.to_csv(csv_file, index=False, quoting=csv.QUOTE_ALL)
 
     def cluster(self, config: str):
         """Perform clustering on NLP processed data."""

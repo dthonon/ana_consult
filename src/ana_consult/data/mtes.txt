@@ -10,9 +10,14 @@ XXième
 Aleazzo
 Boitani
 Culebra
+Léon
 Luidgi
 Macronie
+Queyras
+Savoie
+Ségolène
 Tchernobyl
+Valberg
 Valmer
 Wolfalp
 Zunino
@@ -26,7 +31,9 @@ FEADER
 FERUS
 FNC
 FNE
+FNO
 FNSEA
+JA
 LPO
 MNHN
 OFB
@@ -50,7 +57,9 @@ cyberaction
 déchaîné
 déchaînée
 déchaînés
+dédommageables
 éco
+erc
 éthologue
 fladry
 foxlight
@@ -63,8 +72,8 @@ lupus
 patou
 patous
 protégeable
-PastoraLoup
-ProxiLoup
+pastoraloup
+proxiloup
 salers
-Ségolène
 sphynxs
+vttistes
